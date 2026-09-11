@@ -1,5 +1,6 @@
 """main.py -- エントリポイント。引数なしなら GUI 起動、シェイプコードを渡せば
 その場でコマンドラインだけで1件計測して終わる(FR-19)。
+mod_config.json があれば、GUI/CLIいずれでも起動時に一度だけ適用する。
 """
 
 import sys
@@ -37,10 +38,15 @@ def _cli(code: str) -> int:
 
 
 def main() -> int:
+    import mod_config
+    mod_messages = mod_config.apply_mod_config()
+    for msg in mod_messages:
+        print(f"[mod_config] {msg}")
+
     if len(sys.argv) > 1:
         return _cli(sys.argv[1])
     import gui
-    gui.main()
+    gui.main(mod_messages=mod_messages)
     return 0
 
 

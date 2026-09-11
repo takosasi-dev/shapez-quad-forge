@@ -5,16 +5,20 @@ import queue
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
+from typing import List, Optional
 
+import batch
 import construct
+import export_plan
+import favorites
 import levels
 import render
 import shape as S
 import solver
 import throughput as T
 
-_SUBSHAPE_CYCLE = [None, "C", "R", "S", "W"]
+_SUBSHAPE_CYCLE = [None] + list(S.SUBSHAPES)  # mod_config.py で追加された形状も自動で巡回対象になる
 _COLORS = list(S.COLORS)
 _SUBSHAPE_NAMES = {"C": "丸", "R": "角", "S": "星", "W": "風車"}
 _COLOR_NAMES = {"u": "無色", "r": "赤", "g": "緑", "b": "青",
@@ -131,7 +135,7 @@ def _cell_button_colors(cell) -> tuple:
 
 
 class QuadForgeApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, mod_messages: Optional[List[str]] = None) -> None:
         self.root = root
         root.title("QuadForge -- shapez.io 工程計算ツール")
         root.geometry("1220x930")
@@ -149,25 +153,35 @@ class QuadForgeApp:
         self.code_var = tk.StringVar(value="")
 
         self.last_plan = None
+        self.last_guaranteed = False
         self._search_thread = None
         self._progress_queue: "queue.Queue[object]" = queue.Queue()
         self._search_buttons = []
         self._diagram_gen = 0
+        self.favorites: List[favorites.Favorite] = favorites.load()
+        self._batch_thread = None
+        self._batch_queue: "queue.Queue[object]" = queue.Queue()
+        self._last_batch_results = []
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True)
         self.tab_solve = ttk.Frame(nb)
         self.tab_throughput = ttk.Frame(nb)
         self.tab_levels = ttk.Frame(nb)
+        self.tab_batch = ttk.Frame(nb)
         nb.add(self.tab_solve, text="シェイプ編集・探索")
         nb.add(self.tab_throughput, text="生産比率")
         nb.add(self.tab_levels, text="レベル一覧")
+        nb.add(self.tab_batch, text="バッチ計算")
 
         self._build_solve_tab()
         self._build_throughput_tab()
         self._build_levels_tab()
+        self._build_batch_tab()
 
         self._sync_grid_to_code()
+        if mod_messages:
+            self._set_status(f"mod設定を適用しました({len(mod_messages)}件): " + " / ".join(mod_messages), "ok")
 
     # --- タブ1: シェイプ編集・探索 ---
 
@@ -184,6 +198,16 @@ class QuadForgeApp:
         entry = ttk.Entry(code_frame, textvariable=self.code_var, width=28)
         entry.pack(side="left", padx=4)
         ttk.Button(code_frame, text="読込", command=self._load_code_into_grid).pack(side="left")
+
+        fav_frame = ttk.Frame(left)
+        fav_frame.pack(fill="x", pady=(4, 0))
+        ttk.Button(fav_frame, text="★ お気に入りに追加", command=self._add_favorite).pack(side="left")
+        self.favorite_var = tk.StringVar()
+        self.favorite_combo = ttk.Combobox(fav_frame, textvariable=self.favorite_var, state="readonly", width=20)
+        self.favorite_combo.pack(side="left", padx=4)
+        ttk.Button(fav_frame, text="読込", command=self._load_favorite).pack(side="left")
+        ttk.Button(fav_frame, text="削除", command=self._remove_favorite).pack(side="left")
+        self._refresh_favorite_combo()
 
         grid_frame = ttk.LabelFrame(left, text="① 4層×4象限クリック編集(層0=採掘直後/内側)", padding=8)
         grid_frame.pack(fill="x", pady=6)
@@ -215,9 +239,9 @@ class QuadForgeApp:
         color_row.pack()
         self.color_buttons = {}
         for c in _COLORS:
-            hexcol = render.COLOR_HEX[c]
+            hexcol = render.COLOR_HEX.get(c, render.COLOR_HEX["u"])
             fg = "#14181d" if c in ("u", "y", "w", "g") else "#f4f4f4"
-            b = tk.Button(color_row, text=_COLOR_NAMES[c], width=5, relief="flat", bd=0,
+            b = tk.Button(color_row, text=_COLOR_NAMES.get(c, c), width=5, relief="flat", bd=0,
                            font=("Yu Gothic UI", 9, "bold"), bg=hexcol, fg=fg,
                            activebackground=hexcol, activeforeground=fg,
                            highlightthickness=1, highlightbackground=p["panel"],
@@ -249,6 +273,8 @@ class QuadForgeApp:
         search_btn = ttk.Button(btn_frame, text="④ 探索開始", command=self._start_search)
         search_btn.pack(side="left")
         self._search_buttons.append(search_btn)
+        export_btn = ttk.Button(btn_frame, text="手順を書き出し", command=self._export_plan)
+        export_btn.pack(side="left", padx=(6, 0))
         self.progress_bar = ttk.Progressbar(btn_frame, mode="indeterminate", length=150)
         self.status_label = ttk.Label(left, textvariable=self.status_text, style="StatusInfo.TLabel")
         self.status_label.pack(anchor="w", pady=4)
@@ -303,14 +329,14 @@ class QuadForgeApp:
 
         shape_items = [
             (lambda cv, sub=sub: render.draw_subshape_icon(cv, 12, 12, 9, sub, p["text"]),
-             sub, _SUBSHAPE_NAMES[sub])
+             sub, _SUBSHAPE_NAMES.get(sub, sub))
             for sub in S.SUBSHAPES
         ]
         swatch_rows(shape_items, 4)
 
         color_items = [
-            (lambda cv, col=col: cv.create_oval(3, 3, 21, 21, fill=render.COLOR_HEX[col], outline=p["outline"]),
-             col, _COLOR_NAMES[col])
+            (lambda cv, col=col: cv.create_oval(3, 3, 21, 21, fill=render.COLOR_HEX.get(col, render.COLOR_HEX["u"]), outline=p["outline"]),
+             col, _COLOR_NAMES.get(col, col))
             for col in _COLORS
         ]
         swatch_rows(color_items, 4)
@@ -318,7 +344,7 @@ class QuadForgeApp:
         def small_swatch(parent_, code):
             cell = tk.Canvas(parent_, width=16, height=16, bg=p["panel"], highlightthickness=0)
             cell.pack(side="left")
-            cell.create_oval(2, 2, 14, 14, fill=render.COLOR_HEX[code], outline=p["outline"])
+            cell.create_oval(2, 2, 14, 14, fill=render.COLOR_HEX.get(code, render.COLOR_HEX["u"]), outline=p["outline"])
 
         ttk.Label(legend, text="混色の作り方(ミキサーで合成)", style="Panel.TLabel",
                   font=("Yu Gothic UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
@@ -347,7 +373,7 @@ class QuadForgeApp:
 
     def _on_color_hover(self, c: str, entering: bool) -> None:
         btn = self.color_buttons[c]
-        base = render.COLOR_HEX[c]
+        base = render.COLOR_HEX.get(c, render.COLOR_HEX["u"])
         btn.config(bg=_lighten(base) if entering else base)
 
     def _on_cell_hover(self, layer: int, q: int, entering: bool) -> None:
@@ -403,6 +429,56 @@ class QuadForgeApp:
                 self.grid_cells[layer_idx][q] = layer[q]
         self._refresh_cell_buttons()
         self._update_preview()
+
+    # --- お気に入り ---
+
+    def _favorite_display(self, fav: favorites.Favorite) -> str:
+        return f"{fav.code} ({fav.note})" if fav.note else fav.code
+
+    def _refresh_favorite_combo(self) -> None:
+        values = [self._favorite_display(f) for f in self.favorites]
+        self.favorite_combo.configure(values=values)
+        if not values:
+            self.favorite_var.set("")
+        elif self.favorite_var.get() not in values:
+            self.favorite_var.set(values[0])
+
+    def _add_favorite(self) -> None:
+        code = self.code_var.get().strip()
+        if not code:
+            messagebox.showinfo("お気に入り", "シェイプコードが空です。")
+            return
+        try:
+            S.parse(code)
+        except S.ShapeError as e:
+            messagebox.showerror("不正なシェイプコード", str(e))
+            return
+        try:
+            self.favorites = favorites.add(code)
+        except OSError as e:
+            messagebox.showerror("保存に失敗しました", str(e))
+            return
+        self._refresh_favorite_combo()
+
+    def _load_favorite(self) -> None:
+        sel = self.favorite_var.get()
+        for fav in self.favorites:
+            if self._favorite_display(fav) == sel:
+                self.code_var.set(fav.code)
+                self._load_code_into_grid()
+                return
+
+    def _remove_favorite(self) -> None:
+        sel = self.favorite_var.get()
+        for fav in self.favorites:
+            if self._favorite_display(fav) == sel:
+                try:
+                    self.favorites = favorites.remove(fav.code)
+                except OSError as e:
+                    messagebox.showerror("削除に失敗しました", str(e))
+                    return
+                self._refresh_favorite_combo()
+                return
 
     def _update_preview(self) -> None:
         self.preview_canvas.delete("all")
@@ -508,6 +584,7 @@ class QuadForgeApp:
             return
 
         self.last_plan = plan
+        self.last_guaranteed = guaranteed
         uniq = construct.unique_cost(plan)
         guarantee_text = "最小手数を保証" if guaranteed else "実用解(最小保証なし)"
         self._set_status(f"完了: {guarantee_text}", "ok")
@@ -519,6 +596,25 @@ class QuadForgeApp:
         self.tree_text.delete("1.0", "end")
         self.tree_text.insert("1.0", solver.format_plan(plan))
         self._draw_diagram(plan)
+
+    def _export_plan(self) -> None:
+        if self.last_plan is None:
+            messagebox.showinfo("未探索", "先に探索を実行してください。")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
+            initialfile="quadforge_plan.txt",
+        )
+        if not path:
+            return
+        uniq = construct.unique_cost(self.last_plan)
+        try:
+            export_plan.save_text(path, self.last_plan, self.last_guaranteed, uniq)
+        except OSError as e:
+            messagebox.showerror("書き出しに失敗しました", str(e))
+            return
+        self._set_status(f"手順を書き出しました: {path}", "ok")
 
     def _draw_diagram(self, plan) -> None:
         self.diagram_canvas.delete("all")
@@ -622,6 +718,8 @@ class QuadForgeApp:
         tv.bind("<Double-1>", lambda e: self._load_level(tv))
         ttk.Button(f, text="選択したレベルを探索タブへ読み込んで探索開始",
                    command=lambda: self._load_level(tv)).pack(pady=4)
+        ttk.Button(f, text="選択したレベルをバッチ計算タブへ追加(複数選択可)",
+                   command=lambda: self._add_levels_to_batch(tv)).pack(pady=(0, 8))
 
     def _load_level(self, tv: ttk.Treeview) -> None:
         sel = tv.selection()
@@ -634,10 +732,108 @@ class QuadForgeApp:
         self.quad_painter.set(lv.level >= 20)
         self._start_search()
 
+    def _add_levels_to_batch(self, tv: ttk.Treeview) -> None:
+        sel = tv.selection()
+        if not sel:
+            messagebox.showinfo("未選択", "レベル一覧から追加したい行を選択してください(複数選択可)。")
+            return
+        codes = [levels.LEVEL_BY_NUMBER[int(iid)].shape for iid in sel]
+        current = self.batch_input.get("1.0", "end").strip()
+        text = (current + "\n" if current else "") + "\n".join(codes)
+        self.batch_input.delete("1.0", "end")
+        self.batch_input.insert("1.0", text)
 
-def main() -> None:
+    # --- タブ4: バッチ計算 ---
+
+    def _build_batch_tab(self) -> None:
+        f = self.tab_batch
+        p = _PALETTE
+        ttk.Label(f, text="シェイプコードを1行に1つずつ入力(またはレベル一覧タブから追加)して、まとめて構築手順を計算します。",
+                  wraplength=560).pack(anchor="w", padx=8, pady=8)
+
+        self.batch_input = tk.Text(f, height=8, relief="flat", bd=0, wrap="none",
+                                     bg=p["panel_alt"], fg=p["text"], insertbackground=p["text"],
+                                     font=("Consolas", 10), padx=8, pady=6)
+        self.batch_input.pack(fill="x", padx=8)
+
+        btn_frame = ttk.Frame(f)
+        btn_frame.pack(fill="x", padx=8, pady=6)
+        self.batch_button = ttk.Button(btn_frame, text="まとめて計算", command=self._start_batch)
+        self.batch_button.pack(side="left")
+        self.batch_progress = ttk.Progressbar(btn_frame, mode="determinate", length=200)
+
+        self.batch_status_text = tk.StringVar(value="待機中")
+        ttk.Label(f, textvariable=self.batch_status_text, style="StatusInfo.TLabel").pack(anchor="w", padx=8)
+
+        self.batch_result_text = tk.Text(f, height=16, relief="flat", bd=0,
+                                           bg=p["panel_alt"], fg=p["text"], insertbackground=p["text"],
+                                           font=("Consolas", 10), padx=8, pady=6)
+        self.batch_result_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _start_batch(self) -> None:
+        if self._batch_thread is not None and self._batch_thread.is_alive():
+            return
+        raw = self.batch_input.get("1.0", "end")
+        codes = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not codes:
+            messagebox.showinfo("入力なし", "シェイプコードを1行に1つずつ入力してください。")
+            return
+
+        cfg = self._current_config()
+        self.batch_button.config(state="disabled")
+        self.batch_status_text.set(f"0/{len(codes)} 件処理中...")
+        self.batch_progress.configure(maximum=len(codes), value=0)
+        self.batch_progress.pack(side="left", padx=(10, 0))
+        self._batch_queue = queue.Queue()
+
+        def progress(i: int, total: int, msg: str) -> None:
+            self._batch_queue.put(("progress", (i, total, msg)))
+
+        def worker() -> None:
+            try:
+                results = batch.solve_batch(codes, cfg, progress=progress)
+                self._batch_queue.put(("done", results))
+            except Exception as exc:  # バッチスレッドの例外をUIに伝える
+                self._batch_queue.put(("error", str(exc)))
+
+        self._batch_thread = threading.Thread(target=worker, daemon=True)
+        self._batch_thread.start()
+        self.root.after(100, self._poll_batch)
+
+    def _poll_batch(self) -> None:
+        try:
+            while True:
+                kind, payload = self._batch_queue.get_nowait()
+                if kind == "progress":
+                    i, total, msg = payload
+                    self.batch_status_text.set(f"{i}/{total} 件処理中... 直近: {msg}")
+                    self.batch_progress.configure(value=i)
+                elif kind == "done":
+                    self._on_batch_done(payload)
+                    return
+                elif kind == "error":
+                    self.batch_status_text.set(f"エラー: {payload}")
+                    self.batch_progress.pack_forget()
+                    self.batch_button.config(state="normal")
+                    return
+        except queue.Empty:
+            pass
+        if self._batch_thread is not None and self._batch_thread.is_alive():
+            self.root.after(100, self._poll_batch)
+
+    def _on_batch_done(self, results) -> None:
+        self.batch_button.config(state="normal")
+        self.batch_progress.pack_forget()
+        self._last_batch_results = results
+        solved = sum(1 for r in results if r.error is None and r.plan is not None)
+        self.batch_status_text.set(f"完了: {solved}/{len(results)} 件解けました")
+        self.batch_result_text.delete("1.0", "end")
+        self.batch_result_text.insert("1.0", batch.summarize(results))
+
+
+def main(mod_messages: Optional[List[str]] = None) -> None:
     root = tk.Tk()
-    QuadForgeApp(root)
+    QuadForgeApp(root, mod_messages=mod_messages)
     root.mainloop()
 
 

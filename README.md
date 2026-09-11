@@ -21,6 +21,10 @@
 - 目標個数から必要な採掘機/処理ライン数(スループット)を計算
 - GUI(tkinter)とCLI(`python main.py <シェイプコード>`)の両対応
 - 手順図はステップごとに成長しながら表示されるアニメーション付き
+- よく使うシェイプコードをお気に入り登録して呼び出し
+- 構築手順をテキストファイルへ書き出し
+- 複数の目標シェイプをバッチタブでまとめて計算
+- `mod_config.json` を置くとカスタム形状・色・レベルを追加できる(下記「mod対応」参照)
 
 ### 動作環境
 
@@ -50,10 +54,30 @@ build.bat
 ### テスト
 
 ```bash
-python -m pytest test_quadforge.py
+python -m pytest
 ```
 
-16件のテストが通ります。
+36件のテストが通ります(mod対応・バッチ計算・お気に入り・エクスポート機能のテストを含む)。
+
+### mod対応
+
+実行ファイル(ソース実行時は `main.py`)と同じフォルダに `mod_config.json` を置くと、起動時に自動で読み込まれます。ファイルが存在しない、または壊れている場合は無視され、バニラ動作のまま起動します。
+
+```json
+{
+  "subshapes": "X",
+  "colors": {"m": "#ff8800"},
+  "levels": [
+    {"level": 27, "shape": "XmXmXmXm", "required": 500, "reward": "mod_reward_1"}
+  ]
+}
+```
+
+- `subshapes`: 追加する形状記号(半角英大文字1文字ずつ)
+- `colors`: 追加する色記号(半角英小文字1文字)と16進カラーコードの対応
+- `levels`: 追加/上書きするレベル定義(`shape` には上記で追加した記号も使えます)
+
+形状・色・レベルの「定義」を追加するだけの機能であり、mod側が実装する独自の建物ロジックまでは再現できません。
 
 ### 既知の制限事項
 
@@ -80,6 +104,10 @@ python -m pytest test_quadforge.py
 - Computes required miner/processing throughput from a target quantity
 - Both GUI (tkinter) and CLI (`python main.py <shape-code>`) modes
 - The construction-plan diagram animates step by step as it reveals
+- Save frequently used shape codes as favorites for quick recall
+- Export a construction plan to a text file
+- Batch-solve multiple target shapes at once from the Batch tab
+- Drop in a `mod_config.json` to add custom shape types, colors, and levels (see "Mod support" below)
 
 ### Requirements
 
@@ -109,10 +137,30 @@ Produces `dist\QuadForge.exe`.
 ### Tests
 
 ```bash
-python -m pytest test_quadforge.py
+python -m pytest
 ```
 
-16 tests, all passing.
+36 tests, all passing (includes tests for mod support, batch mode, favorites, and export).
+
+### Mod support
+
+Place a `mod_config.json` next to the executable (or `main.py` when running from source) and it's loaded automatically at startup. A missing or malformed file is silently ignored and the app starts with vanilla defaults.
+
+```json
+{
+  "subshapes": "X",
+  "colors": {"m": "#ff8800"},
+  "levels": [
+    {"level": 27, "shape": "XmXmXmXm", "required": 500, "reward": "mod_reward_1"}
+  ]
+}
+```
+
+- `subshapes`: new shape-type letters to add (single uppercase ASCII letters)
+- `colors`: new color letters (single lowercase ASCII letters) mapped to hex colors
+- `levels`: level definitions to add or override (`shape` may use the letters added above)
+
+This only extends shape/color/level *definitions* — it can't reproduce a mod's own custom building logic.
 
 ### Known limitation
 
